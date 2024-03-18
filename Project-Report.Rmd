@@ -1,0 +1,862 @@
+---
+title: "Project Report"
+author: "Revanth Rao"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Abstract
+
+In this project, I examine a data set containing information about an experiment conducted by Steinmetz et al. (2019). In this experiment, four mice received visual stimuli on two screens and were required to make a decision on turning a wheel based on the stimuli presented. In my project, I first explored the provided data set containing information on the first 18 sessions and performed data visualization to examine key information, patterns in the data, and differences between sessions and trials. Then, I integrated the data from all 18 sessions into one data set that was used to build models which would predict the feedback type for a randomly selected trial, and tested them on selected test data.
+
+------------------------------------------------------------------------
+
+## Introduction
+
+In this data set, we are provided with data from 18 sessions of an experiment by Steinmetz et al. (2019) in which a mouse was presented with visual stimuli and based on this stimuli, the mouse had to decide on turning a wheel. These visual stimuli were broken down into left and right contrasts, with each contrast taking one value from 0, 0.25, 0.5, 0.75, or 1. A successful result from a trial depended on the comparison of one contrast to the other. If the mouse received a greater left contrast than right contrast, it succeeded if it turned the wheel right. If a mouse received a greater right contrast than left contrast, it succeeded if it turned the wheel left. If the contrasts both equaled 0, then the mouse succeeded if it kept the wheel still. If the contrasts were non-zero, but equal, then the researchers randomly decided whether the mouse succeeded, with an equal probability of success or failure. During each trial, the researchers collected data on the neural activity of the mice, of which the first 0.4 seconds after the onset of the visual stimuli was provided in the data set. The purpose of this course project is to build a prediction model which can predict the feedback type, either success or failure, for a given trial, using information on the left contrast, right contrast, and the neuron spikes. Given the size and relative complexity of this data set, I began by exploring the data and visualizing certain elements to better understand the structure and patterns in the data. Then, I applied data integration techniques to condense the data into a single data frame that was more accessible to work with, and fit logistic regression models that could be used to predict feedback type for a certain trial. Afterwards, I tested the models on provided test data containing 100 randomly selected trials from both the 1st and 18th sessions to determine the prediction accuracy for each model.
+
+------------------------------------------------------------------------
+
+## Exploratory Data Analysis
+
+To start, I loaded the packages `tidyverse`, `knitr`, `kableExtra`, `dplyr`, `ggplot2`, and `ROCR`, which were necessary to conduct data analysis and visualization. Then I loaded the data and saved it into a list called `session`.
+
+```{r Packages, cache=TRUE, warning=FALSE, message=FALSE, echo=FALSE}
+library(tidyverse)
+library(knitr)
+library(kableExtra)
+library(dplyr)
+library(ggplot2)
+library(ROCR)
+setwd("/Users/revanthrao/Desktop/UC Davis/STA 141A/Data")
+session=list()
+for(i in 1:18){
+  session[[i]]=readRDS(paste('./session',i,'.rds',sep=''))
+}
+```
+
+After loading the data, I did some preliminary data exploration to examine the structure of the data using the first session as an example:
+
+```{r Session 1 Summary, cache=TRUE, echo=FALSE}
+kbl(x = summary(session[[1]]), format = "html", digits = 0, table.attr = "class='table table-hover'",
+      caption = "<center><h1>Summary of Session 1</h1><center>", align = "c") %>%
+  kable_styling(fixed_thead = TRUE)
+```
+
+The data set for each session contains 7 variables. The `contrast_left` and `contrast_right` variables provide the left and right contrasts, each of which take a value in (0, 0.25, 0.5, 0.75, 1). The `feedback_type` variable is a binary variable which can take two values: 1 to denote a success, and -1 to denote a failure. The `brain_area` variable contains information on the mouse brain areas where the neurons are located. The `date_exp` variable gives the date of the experiment. The `spks` variable gives a matrix of the neuron spikes during the experiment for each time increment which is given in the `time` variable. For Session 1, the matrix of neuron spikes for the first 0.4 seconds after the onset of stimuli has `r dim(session[[1]]$spks[[1]])[1]` rows and `r dim(session[[1]]$spks[[1]])[2]` columns.
+
+<br/>
+
+```{r All Session Summary Code, cache=TRUE, echo=FALSE}
+num_sessions=length(session)
+session_info = data.frame(
+  name = rep('name',num_sessions),
+  date =rep('dt',num_sessions),
+  num_areas = rep(0,num_sessions),
+  num_neurons = rep(0,num_sessions),
+  num_trials = rep(0,num_sessions),
+  success_rate = rep(0,num_sessions)
+)
+for(i in 1:num_sessions){
+  temp_data = session[[i]];
+  
+  session_info[i,1]=temp_data$mouse_name;
+  session_info[i,2]=temp_data$date_exp;
+  session_info[i,3]=length(unique(temp_data$brain_area));
+  session_info[i,4]=dim(temp_data$spks[[1]])[1];
+  session_info[i,5]=length(temp_data$feedback_type);
+  session_info[i,6]=mean((temp_data$feedback_type+1)/2);
+}
+session_info$Session = c(1:18)
+session_info = session_info[,c(7, 1:6)]
+
+colnames(session_info) = c("Session", "Mouse Name", "Experiment Date", "Number of Brain Areas",
+                           "Number of Neurons", "Number of Trials", "Success Rate")
+```
+
+After this, I created a data set that contained some session-level statistics on the data. To do so, I first calculated the number of sessions, which is `r num_sessions`. Then, I created a data frame which contains columns for the mouse name, the date of each session, the number of brain areas stimulated during a given session, the number of neurons for a given session, the number of trials in each session, and the success rate of each session. After creating the data frame, I used a `for` loop and iterated over each session to extract the needed information. To calculate the success rate, I had to adjust the `feedback_type` variable as it took on values of 1 and -1. To do this, I added 1 to `feedback_type` and divided by two so that `feedback_type` now took on values of 1 and 0, then calculated the mean of these values, which returned the proportion of successes among trials in each session. Afterwards, I added a column to denote the session number and renamed the columns to produce this table of information:
+
+```{r All Session Summary Table, cache=TRUE, echo=FALSE}
+kbl(x = session_info, format = "html", digits = 3, table.attr = "class='table table-hover'",
+    caption = "<center><h1>Summary of Sessions 1-18</h1><center>", align = "c") %>%
+  kable_styling(fixed_thead = TRUE)
+```
+
+Examining the summary of the session level data, it is clear that there is great variation in the number of brain areas, number of neurons, and number of trials for each session. The number of brain areas engaged during a certain session ranges from 5 to 15, and the number of brain areas differs between sessions for a given mouse as well. The number of neurons with activity in the sessions ranges from 474 to 1769, with sessions that have more brain areas engaged generally having more neurons as well. Excluding Sessions 1 and 18, in which 100 trials were removed, the number of trials ranges from 224 to 447, again showing a good deal of variation. Additionally, the success rates range from 0.61 to 0.83. For all four mice studied in the first 18 sessions, the success rate increased from the first session to the final session.
+
+<br/>
+
+```{r Spk Avg Function, cache=TRUE, echo=FALSE}
+spk_avg_by_area = function(num_trial,session_name){
+  spk.trial = session_name$spks[[num_trial]]
+  area = session_name$brain_area
+  spk.count = apply(spk.trial,1,sum)
+  spk.avg.area = tapply(spk.count, area, mean)
+  return(spk.avg.area)
+}
+```
+
+After this, I defined a function `spk_avg_by_area` which takes takes two arguments: `num_trial` and `session name`. In the function, I start by creating a variable `spk.trial`, which takes the value of the number of spikes for a given session and trial. Then, I created a vector `area` which finds the brain areas for the given session. Then, using `apply()`, I took the sum of the number of spikes for each neuron in the given trial by summing across rows, and saved these values to a vector called `spk.count`. Finally, using the `tapply()` function, I found the mean of the spikes counts grouped by brain area and saved this information in an array called `spk.avg.area`, which the function returns.
+
+<br/>
+
+```{r Trial Summaries List, cache=TRUE, echo=FALSE}
+trial_summaries_by_area = list()
+for (i in 1:18) {
+  n.trial=length(session[[i]]$feedback_type)
+  n.area=length(unique(session[[i]]$brain_area))
+  trial.summary = matrix(nrow=n.trial,ncol= n.area+1+2+1)
+  for(num_trial in 1:n.trial){
+    trial.summary[num_trial,]=c(spk_avg_by_area(num_trial,session_name = session[[i]]),
+                                session[[i]]$feedback_type[num_trial],
+                                session[[i]]$contrast_left[num_trial],
+                                session[[i]]$contrast_right[i],
+                                num_trial)
+    colnames(trial.summary)=c(names(spk_avg_by_area(num_trial, session_name = session[[i]])), 
+                              "feedback", "left contr.","right contr.","id")
+    trial.summary = as.data.frame(trial.summary)  
+  }
+  trial.summary$session_id = rep.int(session_info$Session[i], times = n.trial)
+  trial_summaries_by_area[[i]] = trial.summary
+}
+```
+
+After creating this function, I was wondering if the mean number of spikes in a trial differed by brain area. To investigate this, I used a `for` loop to create a list of data frames called `trial_summaries_by_area` which contained the mean number of spikes for each trial by brain area. To begin, I created an empty list, then ran a `for` loop to iterate over the data from every session. I first found the number of trials, the number of unique brain areas in the session, and created a matrix `trial.summary` to store the values of the means by brain area along with the feedback, left and right contrast, and the trial number. Then, I used a nested `for` loop to iterate over each trial in a given session `i`. I used the `spk_avg_by_area` function to find the mean number of spikes for each unique brain area in a trial, then saved information on the feedback, contrasts, and trial number, doing so for each trial and saving the information in the `trial.summary` matrix. Afterwards, I named the columns of the matrix to reflect the brain areas and converted the matrix to a data frame. Finally, I added a column called `session_id` which shows the session number for a given session. I did this for all `r length(session)` sessions, creating a list of `r length(trial_summaries_by_area)` with information on all trials in every session.
+
+<br/>
+
+After doing this, I wanted to visualize the data to see how the mean number of spikes varied over the course of the trials in a session. To do so, I used the mean number of spikes for brain areas ACA and CA3 in Session 1 to begin the exploration, and created line charts using `ggplot` and `geom_line` show the variation of mean spikes by trial. These plots are stored in the "Appendix" under Plot 1 and Plot 2. The two plots do appear to show some variation in the mean number of spikes between different brain areas. The mean spikes in brain area ACA for Session 1 vary from about 0.45 to 1.65, while the mean spikes in brain area CA3 for Session 1 typically vary from about 1.5 to 2.75, with one trial having a mean of over 3.5 spikes. However, these plots are difficult to understand, as there is great variation between trials for a given brain area, and are ultimately not meaningful in helping understand the data. As a result, I decided to approach the visualization in a different way. 
+
+<br/>
+
+I decided to create box plots and bar plots by session that showed the mean number of spikes by brain area, separated by whether a given trial was a success or failure. To do this, I had to transform the data. I first created a blank list called `trial_summaries_by_area_long`, then used a `for` loop to iterate over all 18 sessions. In the `for` loop, I created a temporary variable called values which transformed the ith data frame in `trial_summaries_by_area` from a wide format to a long format. I first removed all variables and grouped all the brain areas into a column called `Area`, then grouped all the mean spike counts by trial into a column called `Mean`. Then, I arranged the data set by the different names in `Area` and added the `id` and `session_id` variables back to the data. I then converted the data into a data frame and saved it into the `trial_summaries_by_area_long` list, doing so for every session. Afterwards, I used a `for` loop and the `rbind` function to combine all the data frames `trial_summaries_by_area_long` into one data frame called `all_values_by_area`. Finally, I used the pipe operator `%>%` to create a new data set called `all_values_by_area_long` which would provide the values needed for plotting. To do so, I took `all_values_by_area` and grouped by `Area` first to get all trials from a given area together, then grouped by `session_id` to sort the trials within each brain area by session, then grouped by `feedback`to sort the trials with a given area and session based on if the trial was a success or failure. After that, I calculated the mean spikes for each grouping of brain area, session, and feedback type and stored it in a temporary variable called `mean_spikes`. I then renamed the columns, producing the data set, of which the first 15 rows are shown below:
+
+```{r Trial Summaries by Area Long and All Values, cache=TRUE, message=FALSE, echo=FALSE}
+trial_summaries_by_area_long = list()
+for (i in 1:num_sessions) {
+  values = trial_summaries_by_area[[i]] %>%
+    pivot_longer(cols = -c(id, feedback, `left contr.`, `right contr.`, session_id),
+                 names_to = "Area", values_to = "Mean") %>%
+    arrange(Area) %>%
+    select(session_id, id, Area, Mean, feedback)
+  trial_summaries_by_area_long[[i]] = data.frame(values)
+}
+
+all_values_by_area = data.frame()
+for (i in 1:num_sessions) {
+  all_values_by_area = rbind(all_values_by_area, trial_summaries_by_area_long[[i]])
+}
+
+all_values_by_area_long = all_values_by_area %>%
+  group_by(Area, session_id, feedback) %>%
+  summarise(mean_spikes = mean(Mean))
+colnames(all_values_by_area_long) = c("area", "session_id", "feedback", "mean_spikes")
+
+kable_all_values_by_area_long = all_values_by_area_long
+colnames(kable_all_values_by_area_long) = c("Brain Area", "Session Number", "Feedback Type", "Mean Spikes")
+
+kbl(x = head(kable_all_values_by_area_long, n = 15), format = "html", digits = 3, table.attr = "class='table table-hover'",
+    caption = "<center><h1>Summary of Area Means by Feedback and Session</h1><center>", align = "c") %>%
+  kable_styling(fixed_thead = TRUE)
+```
+
+<br/>
+
+Using the data set, I created box plots for the sessions to see whether the summary statistics such as median, 1st quartile, and 3rd quartile as well as the spread of the mean spikes for each brain area in a given session were meaningfully different during success trials and failure trials. Two examples of such plots are shown below:
+
+<br/>
+
+```{r Boxplot 1, cache=TRUE, echo=FALSE, fig.width=10, dpi=300}
+plot_6_data = trial_summaries_by_area_long[[6]]
+plot_6_data$feedback = ifelse(plot_6_data$feedback == 1, "Success", "Failure")
+ggplot(plot_6_data, aes(x = Area, y = Mean, color = as.factor(feedback))) + 
+  geom_boxplot(position = "dodge") + 
+  facet_wrap(~as.factor(feedback)) +
+  labs(title = "Mean Spikes by Feedback and Area for Session 6",
+       x = "Area",
+       y = "Mean Spikes",
+       color = "Feedback Type") +
+  theme(plot.title = element_text(hjust = 0.5),
+        axis.text.x = element_text(angle = 45, hjust = 0.5))
+```
+
+<br/>
+
+```{r Boxplot 2, cache=TRUE, echo=FALSE, fig.width=10, dpi=300}
+plot_7_data = trial_summaries_by_area_long[[7]]
+plot_7_data$feedback = ifelse(plot_7_data$feedback == 1, "Success", "Failure")
+ggplot(plot_7_data, aes(x = Area, y = Mean, color = as.factor(feedback))) + 
+  geom_boxplot(position = "dodge") + 
+  facet_wrap(~as.factor(feedback)) +
+  labs(title = "Mean Spikes by Feedback and Area for Session 7",
+       x = "Area",
+       y = "Mean Spikes",
+       color = "Feedback Type") +
+  theme(plot.title = element_text(hjust = 0.5),
+        axis.text.x = element_text(angle = 45, hjust = 0.5))
+```
+```{r Brain Areas Number, cache=TRUE, echo=FALSE}
+mean_bar_graphs_by_area = list()
+brain_areas = unique(all_values_by_area_long$area)
+```
+<br/>
+
+Looking at the plots for Sessions 6 and 7, which are fairly representative of the trends shown in the box plots for each session, it appears that the median values of mean spikes are roughly similar for failure and success trials. The spread of mean spikes is larger during success trials for some brain areas and larger during failure trials for other brain areas, but the differences are not extremely noticeable. There also seems to be a few outliers for some brain areas, but typically, a brain area has outliers for both success and failures trials in a given session, so there is no obvious pattern with the outliers. Overall, these groups of box plots appear to show that there is not a clear difference in mean number of spikes between trials ending in a success versus trials ending in failure. To continue this exploration, I created a list of bar graphs which showed the mean number of spikes sorted by feedback type for each brain area and session. To create each bar graph, I first created an empty list called `mean_bar_graphs`, then created a vector named `brain_areas` which stored all the brain areas that showed neural activity over the course of the 18 sessions. I then ran a `for` loop to iterate over the `r length(brain_areas)` brain areas, in which I first filtered `all_values_by_area_long` using the pipe operator `%>%` to show only data from the brain area for that particular iteration. I then created a temporary object `area_i_plot` which stored a bar graph that used data from `data_area_i` with session number on the x-axis and mean spikes on the y-axis. In this step, I used the `factor()` to convert the `session_id` into a factor to make the x-axis discrete rather than continuous. I also used the `fill = factor(feedback)` prompt in `ggplot` to create two bars for each session, one showing the mean spikes for trials that end in failure, and one showing the mean spikes for trials that end in success. I then used `geom_bar` to make the graph a bar graph, and added axis labels and a title using the `paste()` function in order to generate a title specific to each brain area. Afterwards, I used `scale_fill_manual()` to color the bars representing failures red and the bars representing successes green. Finally, I saved the temporary object `area_i_plot` as the ith element of the list `mean_bar_graphs`.
+
+```{r Mean Bar Graphs, cache=TRUE, echo=FALSE}
+for (i in brain_areas) {
+  data_area_i = all_values_by_area_long %>%
+    filter(area == i)
+  area_i_plot = ggplot(data = data_area_i,
+                       aes(x = factor(session_id), y = mean_spikes, fill = factor(feedback))) +
+    geom_bar(stat = "identity", position = "dodge") +
+    labs(x = "Session Number", y = "Mean Number of Spikes",
+         title = paste("Mean Spikes for Brain Area", i, sep = " "),
+         fill = "Trial Outcome") +
+    scale_fill_manual(values = c("red4", "green4"), labels = c("Failure", "Success")) 
+  mean_bar_graphs_by_area[[i]] = area_i_plot
+} 
+```
+
+<br/>
+
+After creating the plots, I examined the various brain areas and how the mean number of spikes in trials ending in success differed from trials ending in failure. Here are a few of the plots:
+
+<br/>
+
+```{r Mean Bar Graph 1,cache=TRUE, echo=FALSE}
+mean_bar_graphs_by_area[["CA3"]]
+```
+
+<br/>
+
+
+```{r Mean Bar Graph 2, cache=TRUE, echo=FALSE}
+mean_bar_graphs_by_area[["MOs"]]
+```
+<br/>
+
+```{r Mean Bar Graph 3, echo=FALSE, cache=TRUE}
+mean_bar_graphs_by_area[["MRN"]]
+```
+
+```{r Differences and Hypothesis Tests, cache=TRUE, message=FALSE, echo=FALSE}
+differences = all_values_by_area_long %>%
+  group_by(area, session_id) %>%
+  summarise(mean_spikes_difference = sum(feedback*mean_spikes))
+
+num_success_over_failure = 0
+for (i in 1:length(differences$mean_spikes_difference)) {
+  if (differences$mean_spikes_difference[i] > 0) {
+    num_success_over_failure = num_success_over_failure + 1
+  }
+}
+
+proportion = num_success_over_failure / length(differences$mean_spikes_difference)
+
+x = unique(session[[1]]$brain_area)
+y = unique(session[[2]]$brain_area)
+z = unique(session[[3]]$brain_area)
+w = c(x, y, z)
+
+t_test = t.test(mean_spikes ~ as.factor(feedback), data = all_values_by_area_long)
+kw_test_brain_area = kruskal.test(Mean ~ as.factor(Area), data = all_values_by_area)
+```
+
+In these plots, which are fairly representative of every bar plot I created, the mean number of spikes shows great variation between sessions and between brain areas. It seems that certain brain areas can have large differences in the mean spikes across sessions. The mean spikes for many sessions is greater for trials ending in success as compared to trials ending in failure, but only slightly so. Additionally, there are sessions in which the mean spikes for a failure trial is larger, so it is not entirely clear that there is a significant difference in the mean spikes between success and failure trials. 
+
+To see if there was a difference in mean spikes between success and failure trials, I calculated the proportion of sessions in which this was the case. I began this analysis by creating a data frame called `differences`, and passed `all_values_by_area_long` through the pipe operator `%>%`. I first grouped by area, then session id, then used `summarise()` to create a column called `mean_spikes_difference`. In this column, I multiplied `feedback` by `mean_spikes`, which made the mean spikes for failure trials negative as the feedback for failure was -1, then took the sum, which added the mean spikes for success and failure for a given brain area and session. After creating this data set, I created a variable called `num_success_over_failure` and initialized it as 0. I then used a `for` loop to iterate over each row in the data set, and in the loop, I used an `if` statement to check whether the difference between success and failure mean spikes was positive. If the difference was positive, I increased `num_success_over_failure` by 1.
+
+After doing this, I calculated the proportion of sessions where the mean spikes for a given brain area was higher in success trials than failure trials, and I got a proportion of `r round(proportion, digits = 3)`. This proportion appears to be extremely high, as it shows that for nearly every brain area, there are more spikes in success trials than failure trials. However, the average difference in mean spikes is only `r mean(differences$mean_spikes_difference)`, which is not a large difference considering that the average number of mean spikes is `r mean(all_values_by_area_long$mean_spikes)`, so the magnitude of the difference is fairly small.
+
+This observation was further supported by a hypothesis test. I ran Welch's Two Sample t-test to test the hypotheses:
+
+<br/>
+
+$H_0: \mu_S = \mu_F$
+
+$H_A: \mu_S \neq \mu_F$
+
+<br/>
+
+Where: 
+
+- \( \mu_S \) represents the mean of `mean_spikes` for success trials
+
+- \( \mu_F \) represents the mean of `mean_spikes` for failure trials
+
+I chose the Welch's Two Sample t-test to test these hypotheses because the test does not assume normality or equal variance, both of which are not accurate assumptions to make for this data. Using a significance level of $\alpha = 0.05$, I got a p-value of `r t_test$p.value` as well as a 95% confidence interval of (`r t_test$conf.int`). As the p-value is larger than $\alpha$ and the 95% confidence interval contains 0, I fail to reject the null hypothesis that the mean of mean spikes for success and failure trials is the same. Based on this test result and the plots displayed above, I concluded that feedback type is not particularly meaningful for the purpose of this project.
+
+Additionally, I wanted to test whether brain area had a significant impact on mean number of spikes. Because there were many brain areas, I needed to use a test which could examine the means across more than two samples. Given that I could not verify the assumptions of normality, independence, and equal variance needed for a single-factor Analysis of Variance (ANOVA) model, I instead used the Kruskal-Wallis rank sum test, a non-parametric test which tests for equality of means for more than two populations, to test the following hypotheses:
+
+<br/>
+
+$H_0:$ The mean of the mean neuron spikes is the same across all brain areas
+
+$H_A:$ The mean of the mean neuron spikes is the not same across all brain areas
+
+<br/>
+
+Testing these hypotheses resulted in a p-value that is less than \(2.2 \times 10^{-16}\), which is smaller than any meaningful value of $\alpha$ used in hypothesis testing. As a result, I rejected the null hypothesis to conclude that the mean spikes does differ based on brain area. However, given that the model will be tested on data from Sessions 1 and 18, at least one brain area present in these sessions is also present in every other session, meaning that it would not make sense to remove data when creating a model. As a result, I decided that I would not remove any data from the data set based on the brain areas present in a given session.
+
+The final test I decided to run was a Kruskal-Wallis rank sum test to test whether the mean number of spikes differed between mice. Using this test, I tested the following hypotheses:
+
+<br/>
+
+$H_0:$ The mean of the mean neuron spikes is the same across all mice
+
+$H_A:$ The mean of the mean neuron spikes is the not same across all mice
+
+<br/>
+
+Running this test provided another p-value that was less than \(2.2 \times 10^{-16}\), which is smaller than any meaningful value of $\alpha$ used in hypothesis testing. As a result, I rejected the null hypothesis to conclude that the mean spikes does differ based on the mouse. Based on this information, I decided that I would separate the data during data integration to create one data set that had all trials for mouse Cori to use for predicting Session 1 outcomes, and another data set that had all the trials for mouse Lederberg to use for predicting Session 18 outcomes.
+
+------------------------------------------------------------------------
+
+## Data Integration
+
+```{r Trial Data creator, cache=TRUE, echo=FALSE}
+trial_data = list()
+for (i in 1:num_sessions){
+  df_i = data.frame(name = rep(session_info$`Mouse Name`[i], session_info$`Number of Trials`[i]),
+                  session_id = rep(i, session_info$`Number of Trials`[i]),
+                  trial_id = 1:session_info$`Number of Trials`[i],
+                  left_contrast = session[[i]]$contrast_left,
+                  right_contrast = session[[i]]$contrast_right,
+                  total_spikes = rep(0, session_info$`Number of Trials`[i]),
+                  mean_spikes_all_neurons = rep(0, session_info$`Number of Trials`[i]),
+                  proportion_active_neurons = rep(0, session_info$`Number of Trials`[i]),
+                  mean_spikes_active_neurons = rep(0, session_info$`Number of Trials`[i]),
+                  number_brain_areas = rep(session_info$`Number of Brain Areas`[i],
+                                           session_info$`Number of Trials`[i]),
+                  feedback_type = session[[i]]$feedback_type,
+                  feedback_binary = rep(0, session_info$`Number of Trials`[i]))
+  for (j in 1:session_info$`Number of Trials`[i]) {
+    spks.trial=session[[i]]$spks[[j]]
+    total.spikes = apply(spks.trial,1,sum)
+    sum.spikes = sum(total.spikes)
+    avg.spikes=mean(total.spikes)
+    prop_active_neurons = mean(total.spikes > 0)
+    active_neurons_mean = mean(total.spikes[total.spikes>0])
+    success_binary = ifelse(session[[i]]$feedback_type[[j]] == 1, 1, 0)
+    df_i$total_spikes[j] = sum.spikes
+    df_i$mean_spikes_all_neurons[j] = avg.spikes
+    df_i$proportion_active_neurons[j] = prop_active_neurons
+    df_i$mean_spikes_active_neurons[j] = active_neurons_mean
+    df_i$feedback_binary[j] = success_binary
+  }
+  trial_data[[i]] = df_i
+}
+```
+
+After conducting exploratory data analysis, I focused on data integration. My goal for this portion of the project was to create a single data set which contained information on each trial and session along with the mean number of spikes for every trial in all 18 sessions. After this, I would create separate data sets for mouse Cori and mouse Lederberg which contained all the trials performed by these two mice.
+
+I began by creating a list of data sets that contained the desired information for each session. To do so, I created a blank list called `trial_data`, then wrote a `for` loop to iterate over all 18 sessions. In the `for` loop, I then created a temporary data frame `df_i` which contains a number of variables. The `name` variable contains the name of the mouse for a given session and `session_id` contains the session number for a given session, with the values for both variables coming from the `session_info` data set. The `left_contrast` and `right_contrast` variables show the left and right contrast for each of the trials, with the data coming from the `session` list. The `total_spikes` variable contains the total spikes for each trial, `mean_spikes_all_neurons` contains the mean spikes for every neuron in a trial, `proportion_active_neurons` contains the proportion of neurons that fire in a trial, and `mean_spikes_active_neurons` contains the mean of spikes for neurons that fire in a trial. Each of these are populated with filler values of 0 using the `rep()` function when creating the data set, but are replaced by the actual values when iterating over the trials. The `number_brain_areas` contains the number of brain areas used during a given session, `feedback_type` contains the feedback type for a given trial, and `feedback_binary` converts `feedback_type` to a variable which denotes a successful trial as "1" and a failure trial as "0". The information on number of brain areas comes from `session_info`, while the feedback type comes from the `session` list and the `feedback_binary` variable is populated with 0s using `rep()`
+
+After creating the initial data frame, I created a second nested `for` loop to iterate over all the trials in every session. I created a temporary variable called `spks.trial` which contained the spikes matrix for the jth trial in the ith session. I then used the `apply()` function to calculate the sum of spikes for each neuron in a trial by summing across rows, and saved this in a variable called total.spikes. After this, I calculated the total number of spikes for each trial by taking the sum of `total.spikes`, and saved this in a variable called `sum.spikes`. I then calculated the mean number of spikes for each trial by taking the mean of `total.spikes`, saving this in `avg.spikes`. Following this, I calculated the proportion of neurons which showed spikes in a given trial by taking the mean of `total.spikes` \> 0, and saved it to `prop_active_neurons`. I then found the mean number of spikes for neurons which fired in a given trial by taking the mean of `total.spikes` when it was greater than 0, and saved this into `active_neurons_mean`. Finally, I created a `success_binary` variable, which used the `ifelse()` function to convert the values of -1 in feedback type to 0. After this, I assigned all the temporary variables I created within the `for` loop to the appropriate variables in `df_i.` To finish this process, I closed the second `for` loop and within the first `for` loop, saved df_i as the ith element of the `trial_data` list.
+
+<br/>
+
+After this, I created an empty data frame called `full_data` and used the `rbind` function to combine every data frame in the `trial_data` list into a single data frame, of which the first 15 rows are shown below:
+
+```{r Full Data Creator, cache=TRUE, echo=FALSE}
+full_data = data.frame()
+for (i in 1:num_sessions) {
+  full_data = rbind(full_data, trial_data[[i]])
+}
+
+kable_data = full_data
+colnames(kable_data) = c("Mouse Name", "Session", "Trial", "Left Contrast", "Right Contrast", "Total Spikes",
+                         "Mean Spikes for All Neurons", "Proportion of Active Neurons",
+                         "Mean Spikes for Active Neurons", "Number of Brain Areas", "Feedback Type", 
+                         "Feedback Type Binary")
+
+kbl(x = head(kable_data, n = 15), format = "html", digits = 3, table.attr = "class='table table-hover'",
+    caption = "<center><h1>Summary of Trials for all Sessions</h1><center>", align = "c") %>%
+  kable_styling(fixed_thead = TRUE)
+```
+```{r Kruskal-Wallis Mouse Test, cache=TRUE, echo=FALSE}
+kw_test_mouse = kruskal.test(mean_spikes_all_neurons ~ name, data = full_data)
+```
+<br/>
+
+Above is the first 15 rows of the full data set. After creating the data frame `full_data`, I also made two other data sets called `cori_data` and `lederberg_data`, which capture trials from `full_data` performed by mouse Cori and mouse Lederberg. The data set `cori_data` covers trials from Sessions 1-3 as Cori was the mouse for these trials, and `lederberg_data` covers trials from Sessions 12-18 as Lederberg was the mouse for these trials.
+
+```{r Session 1 and 18 Data, cache=TRUE, echo=FALSE} 
+cori_data = full_data %>%
+  filter(name == "Cori") %>%
+  select(-c(name, session_id, trial_id, total_spikes, number_brain_areas, feedback_type))
+
+lederberg_data = full_data %>%
+  filter(name == "Lederberg") %>%
+  select(-c(name, session_id, trial_id, total_spikes, number_brain_areas, feedback_type))
+```
+
+After creating these three data sets, I began the process of predictive modeling for the feedback type.
+
+------------------------------------------------------------------------
+
+## Predictive Modeling
+
+```{r Model 1 Creation and Prediction, cache=TRUE, echo=FALSE}
+model_data = full_data %>%
+  select(-c(name, session_id, trial_id, total_spikes, proportion_active_neurons, 
+            mean_spikes_active_neurons, number_brain_areas, feedback_type))
+
+num_observations = length(full_data$name)
+set.seed(1)
+sample = sample.int(n = num_observations, size = floor(.8 * num_observations), replace = FALSE)
+training_data = model_data[sample, ]
+test_data = model_data[-sample, ]
+model1 = glm(feedback_binary ~ ., data = training_data, family = "binomial")
+
+pred = predict(model1, newdata = test_data %>% select(-feedback_binary), type = 'response')
+predictions = ifelse(pred > 0.5, 1, 0)
+error = mean(predictions != test_data$feedback_binary)
+succ_rate_lm1 = 1-error
+total_success_rate = sum(full_data$feedback_binary) / length(full_data$feedback_binary)
+```
+
+After performing data integration to get a singular data set with information on mean spikes for all trials, I then created a logistic regression model using this data to attempt to predict the feedback type. This model will be considered the benchmark model given that it uses the full data set and uses only three covariates, and every subsequent model's performance will be compared against the prediction performance for this model. To create this benchmark model, I first made a new data set called `model_data` which contained only the variables that would be used in the regression using the `select` function to remove variables. I then found the number of observations in the data set using `length()`, then set the random seed to allow my results to be reproducible. After this, I used the `sample.int` function to create a vector of random integers called `sample`. This vector draws a random sample of integers from 1 to `r num_observations` without replacement that is 80% of the length of the `model_data` data set. I then created a training data set called `training_data` which contains the rows from `model_data` which correspond to the values of `sample`, and a test data set called `test_data` which contains the rows from `model_data` which do not correspond to the values of `sample`. Finally, I created a logistic regression model called `model1` using the `glm()` function which uses `feedback_binary` variable as the outcome variable, and `mean_spikes_all_neurons`, `left_contrast`, and `right_contrast` as the covariates. This model also uses the `training_data` data set as the data and the "binomial" family to make it a logistic regression.
+
+To evaluate this model and all other models, I decided to calculate the prediction success rate on the test data, and choose the model or models which had the largest values for these two metrics. The reason I chose prediction success rate is because this provides an intuitive and powerful metric which classifies how accurate the model was in predicting feedback on a data set. Additionally, this metric can be easily be compared across various models, so it was a logical choice for determining the prediction performance for each model.
+
+After creating the model, I tested the model on the `test_data` created above. I used the `predict()` function on `model1` using `test_data` without the `feedback_binary` variable to try and predict the response variable, saving this in a variable called `pred`. Then, I used the `ifelse()` function to test whether `pred` > 0.5, and saved the value 1 if this was true and 0 if this was false in the `prediction` variable. The reason for doing this is because the prediction gave a number of different values between 0 and 1, but a successful trial was classified as 1 in the `feedback_binary` variable in `model_data`, and a failed trial was classified as 0, so I considered any predictions that were closer to 1 than 0 as a success prediction and any predictions that were closer to 0 than 1 as failures. Then, I used the `mean()` function to calculate the proportion of predictions which were not equal to the actual value of the `feedback_binary` variable and saved this in the `error` variable. Then, I subtracted the error rate from 1 to get the success rate for prediction with this model. Using this calculation, the success rate for this prediction is `r succ_rate_lm1`. Given that the total success rate for trials is `r total_success_rate`, this prediction does slightly better than a naive prediction of success for every trial. However, this model could certainly be improved.
+
+<br/>
+
+```{r Ridge and Lasso Models, cache=TRUE, message=FALSE, echo=FALSE}
+library(glmnet)
+cv_glm_model_lasso = cv.glmnet(as.matrix(training_data[, -4]), training_data$feedback_binary,
+                               alpha = 1, family = "binomial")
+cv_prediction_lasso = predict(cv_glm_model_lasso, newx = as.matrix(test_data[, -4]), s = "lambda.min")
+
+predictions_cv_glm_lasso = ifelse(cv_prediction_lasso > 0.5, 1, 0)
+error_cv_glm_lasso = mean(predictions_cv_glm_lasso != test_data$feedback_binary)
+succ_rate_lasso = 1-error_cv_glm_lasso
+
+cv_glm_model_ridge = cv.glmnet(as.matrix(training_data[, -4]), training_data$feedback_binary,
+                               alpha = 0, family = "binomial")
+cv_prediction_ridge = predict(cv_glm_model_ridge, newx = as.matrix(test_data[, -4]), s = "lambda.min")
+
+predictions_cv_glm_ridge_0.5 = ifelse(cv_prediction_ridge > 0.5, 1, 0)
+error_cv_glm_ridge_0.5 = mean(predictions_cv_glm_ridge_0.5 != test_data$feedback_binary)
+succ_rate_ridge_0.5 = 1-error_cv_glm_ridge_0.5
+
+predictions_cv_glm_ridge_0.4 = ifelse(cv_prediction_ridge > 0.4, 1, 0)
+error_cv_glm_ridge_0.4 = mean(predictions_cv_glm_ridge_0.4 != test_data$feedback_binary)
+succ_rate_ridge_0.4 = 1 - error_cv_glm_ridge_0.4
+succ_rate_diff = -(succ_rate_ridge_0.5 - succ_rate_ridge_0.4)
+```
+
+After this, I decided to fit a logistic regression model using the lasso penalty. I used the `cv.glmnet()` function to find a tuning parameter using cross-validation, setting `alpha = 1` to fit a lasso regression. Using the `model_data` data set, I chose the mean number of spikes and the contrasts as the predictor variables and the feedback type as the outcome variable in the function, and specified the family in the function to be binomial to fit a logistic regression model. Then, I used the `predict()` function in a similar fashion to the previous model to predict the `feedback_binary` variable using the model, a `newx` which was the mean number of spikes and contrasts from `test_data`, and a tuning parameter of "lambda.min", which is the $\lambda$ value that minimizes the amount of error, found using cross-validation. Then, I used the same code as the prior model to convert the predictions into failures or successes and calculate the error and success rate. This error was `r succ_rate_lasso`, which was not only lower than the benchmark model of logistic regression, but also slightly lower than a naive prediction of success for every trial. As a result, this model's performance was not accurate enough to justify its use over the benchmark model.
+
+<br/>
+
+I also decided to test a logistic regression model with the ridge penalty. I used the same code as I used for the lasso model, with the exception of `alpha = 0`, which specifies a ridge regression. Using this model, I got an success rate of `r succ_rate_ridge_0.5`, which is better than the success rate produced by the model with the lasso penalty, but worse than the benchmark logistic regression. This success rate is also only very slightly better than the naive prediction of success for every trial. I also tested a cutoff point of 0.4 rather than 0.5 for this model, which increased the success rate to `r succ_rate_ridge_0.4`, which is `r succ_rate_diff` higher than the success rate when the cutoff point is 0.5. However, this is still slightly lower than the benchmark model, so I believe that model remains preferable. Overall, I believe that for this exercise, models using lasso and ridge penalty and cross validation do not provide better results than a typical logistic regression model, so I decided not to use these in other models I tested.
+
+<br/>
+
+To check the performance of the various models, I decided to draw Receiver Operator Characteristic (ROC) curves, which show model performance in prediction by making a plot of false positive rate against true positive rate in prediction for a model. To do this for each model, I used the `prediction()` function to create a prediction instance based on the true values of `feedback_binary` from `test_data`. I then used the `performance()` function to calculate the true positive rate, or the rate at which the model correctly predicted positive results, and false positive rate, or the rate at which the model incorrectly predicted positive results, for varying threshold values. Following this, I used the `performance()` function again to find the AUC, or the area under the ROC curve, and then got the value using `@y.values[[1]]`. After repeating this for every model, I plotted the ROC curves for each model along with a bias line of $y = x$, which is the expected success rate when randomly guessing binary outcomes. Below are the ROC curves produced:
+
+```{r ROC Curves First 3 Models, cache=TRUE, echo=FALSE}
+pr = prediction(pred, test_data$feedback_binary)
+prf = performance(pr, measure = "tpr", x.measure = "fpr")
+auc = performance(pr, measure = "auc")
+auc = auc@y.values[[1]]
+
+pr1 = prediction(cv_prediction_lasso, test_data$feedback_binary)
+prf2 = performance(pr1, measure = "tpr", x.measure = "fpr")
+auc2 = performance(pr1, measure = "auc")
+auc2 = auc2@y.values[[1]]
+
+pr2 = prediction(cv_prediction_ridge, test_data$feedback_binary)
+prf3 = performance(pr2, measure = "tpr", x.measure = "fpr")
+auc3 = performance(pr2, measure = "auc")
+auc3 = auc3@y.values[[1]]
+
+plot(prf2, col = 'red', main = 'ROC Curves')
+plot(prf, add = TRUE, col = 'blue')
+plot(prf3, add = TRUE, col = 'green')
+abline(a=0, b=1, col='black', lty=3)
+
+legend("bottomright", legend=c("Logistic", "Lasso", "Ridge", "Bias Line"), 
+       col=c("blue", "red", 'green','black'), lty=c(1, 1, 1, 3), cex=0.8)
+```
+
+Examining the ROC curves, it appears that each curve is very similar. This would indicate that the models are relatively similar in terms of the accuracy of their predictions, and each model is fairly consistent across various threshold levels as well. Additionally, it appears that each ROC curve is consistently above the bias line of $y = x$ for the vast majority of the graphs, which would indicate that their performance is much better than a random guess. The AUC values are `r round(auc, 4)` for the logistic regression, `r sprintf("%.4f", auc2)` for the logistic regression with the lasso penalty, and `r round(auc3, 4)` for the logistic regression with the ridge penalty. These are acceptable values, but certainly could be improved upon.
+
+<br/>
+
+To attempt to improve model performance, I decided to change the covariates in the logistic regression, adding the proportion of active neurons for each trial into the models.
+
+```{r Logistic Models 2 and 3, cache=TRUE, echo=FALSE}
+model_data2 = full_data %>%
+  select(-c(name, session_id, trial_id, total_spikes, mean_spikes_active_neurons,
+            number_brain_areas, feedback_type))
+set.seed(1)
+training_data2 = model_data2[sample, ]
+test_data2 = model_data2[-sample, ]
+lm_2 = glm(feedback_binary ~ ., data = training_data2, family = "binomial")
+lm_3 = glm(feedback_binary ~ left_contrast + right_contrast + proportion_active_neurons,
+           data = training_data2, family = "binomial")
+
+
+pred_lm2 = predict(lm_2, newdata = test_data2 %>% select(-feedback_binary), type = 'response')
+predictions_lm2 = ifelse(pred_lm2 > 0.5, 1, 0)
+error_lm2 = mean(predictions_lm2 != test_data2$feedback_binary)
+succ_rate_lm_2 = 1 - error_lm2
+
+pred_lm3 = predict(lm_3, newdata = test_data2 %>% select(-feedback_binary), type = 'response')
+predictions_lm3 = ifelse(pred_lm3 > 0.6, 1, 0)
+error_lm3 = mean(predictions_lm3 != test_data2$feedback_binary)
+succ_rate_lm_3 = 1 - error_lm3
+```
+
+To begin, I created a data set called `model_data2` using the select function to remove all the variables from the `full_data` data set except the contrasts, the mean number of spikes, the proportion of active neurons, and `feedback_binary`. After this, I used the same code as the previous logistic regression model to create training and test data sets using `model_data2`, then fit two logistic regression models. The first model uses the contrasts, mean spikes, and the proportion of active neurons as covariates, while the second model uses just the contrasts and the proportion of active neurons as covariates. Then, I used `predict()` to make predictions on the new test data and classified the predictions as success or failure using `ifelse()`, after which I calculated the error and success rates for each model using the same method as previous regressions. After examining the predictions and testing various cutoff points for labeling a prediction as a success prediction or a failure prediction, I opted for a cutoff of 0.5 for the model with contrasts, mean spikes, and proportion of active neurons, and a cutoff of 0.6 for the model with just contrasts and proportion of active neurons as these cutoff points optimized success rate for each respective model. Using this method and the selected cutoff points, the first model produced a success rate of `r succ_rate_lm_2` and the second model produced a success rate of `r succ_rate_lm_3`. Both models outperform the naive prediction of success for every trial, while the second model outperforms the benchmark logistic regression, with the first model matching the success rate for the benchmark model. Considering this information, I believe that the logistic regression with the contrasts and proportion of active neurons as covariates is preferable to the benchmark, while the logistic regression with contrasts, mean spikes, and proportion of active neurons as covariates is roughly the same as the benchmark. To further analyze these models, I plotted the ROC curves.
+
+```{r ROC Curves Benchmark and Models 2 and 3, cache=TRUE, echo=FALSE}
+pr3 = prediction(pred_lm2, test_data2$feedback_binary)
+prf4 = performance(pr3, measure = "tpr", x.measure = "fpr")
+auc4 = performance(pr3, measure = "auc")
+auc4 = auc4@y.values[[1]]
+
+pr4 = prediction(pred_lm3, test_data2$feedback_binary)
+prf5 = performance(pr4, measure = "tpr", x.measure = "fpr")
+auc5 = performance(pr4, measure = "auc")
+auc5 = auc5@y.values[[1]]
+
+plot(prf4, col = 'red', main = 'ROC Curves')
+plot(prf, add = TRUE, col = 'blue')
+plot(prf5, add = TRUE, col = 'orange1')
+abline(a=0, b=1, col='black', lty=3)
+
+legend("bottomright", legend=c("Benchmark", "Logistic Model 2", "Logistic Model 3", "Bias Line"),
+       col=c("blue", "red", 'orange1','black'), lty=c(1, 1, 1, 3), cex=0.8)
+```
+
+Examining these ROC curves, it appears that the benchmark model generally performs better across false positive rates of 0 to 0.4 than Logistic Model 3, the model with the contrasts and the proportion of active neurons as the covariates. However, the prediction performance is generally very similar. Additionally, the area under the ROC curves are fairly similar between each model, so there is not a clear difference between the models in this respect.
+
+<br/>
+
+The next variable I tested in a logistic regression model to predict the feedback type was the mean number of spikes for active neurons.
+
+```{r Logistic Models 4-7, cache=TRUE, echo=FALSE}
+model_data3 = full_data %>%
+  select(-c(name, session_id, trial_id, total_spikes, number_brain_areas, feedback_type))
+set.seed(1)
+training_data3 = model_data3[sample, ]
+test_data3 = model_data3[-sample, ]
+
+lm_4 = glm(feedback_binary ~ ., data = training_data3, family = "binomial")
+lm_5 = glm(feedback_binary ~ left_contrast + right_contrast + proportion_active_neurons +
+             mean_spikes_active_neurons, data = training_data3, family = "binomial")
+lm_6 = glm(feedback_binary ~ left_contrast + right_contrast + mean_spikes_all_neurons +
+             mean_spikes_active_neurons, data = training_data3, family = "binomial")
+lm_7 = glm(feedback_binary ~ left_contrast + right_contrast + mean_spikes_active_neurons,
+           data = training_data3, family = "binomial")
+
+pred_lm4 = predict(lm_4, newdata = test_data3 %>% select(-feedback_binary), type = 'response')
+predictions_lm4 = ifelse(pred_lm4 > 0.5, 1, 0)
+error_lm4 = mean(predictions_lm4 != test_data3$feedback_binary)
+succ_rate_lm4 = 1 - error_lm4
+
+pred_lm5 = predict(lm_5, newdata = test_data3 %>% select(-feedback_binary), type = 'response')
+predictions_lm5 = ifelse(pred_lm5 > 0.5, 1, 0)
+error_lm5 = mean(predictions_lm5 != test_data3$feedback_binary)
+succ_rate_lm5 = 1 - error_lm5
+
+pred_lm6 = predict(lm_6, newdata = test_data3 %>% select(-feedback_binary), type = 'response')
+predictions_lm6 = ifelse(pred_lm6 > 0.5, 1, 0)
+error_lm6 = mean(predictions_lm6 != test_data3$feedback_binary)
+succ_rate_lm6 = 1 - error_lm6
+
+pred_lm7 = predict(lm_7, newdata = test_data3 %>% select(-feedback_binary), type = 'response')
+predictions_lm7 = ifelse(pred_lm7 > 0.5, 1, 0)
+error_lm7 = mean(predictions_lm7 != test_data3$feedback_binary)
+succ_rate_lm7 = 1 - error_lm7
+```
+
+I used similar code as when I created the previous models, using the select function to remove all variables from the data set `full_data` except for the contrasts, the mean number of spikes, the proportion of active neurons, the mean number of spikes for active neurons and `feedback_binary` to create a data set with these variables called `model_data3`. After this, I set the random seed to allow for replication of results, split the data into training and test sets, and then fit four logistic regression models, each using `feedback_binary` as the response variable. The first model used the mean number of spikes, proportion of active neurons, mean number of spikes for active neurons, and the contrasts as the covariates. The second model used the proportion of active neurons, the mean number of spikes for active neurons, and the contrasts as the covariates. The third model used the mean number of spikes, the mean number of spikes for active neurons, and the contrasts as covariates. The fourth model used mean number of spikes for active neurons and the contrasts as the covariates. Then, I used the same code as previous models to make predictions for each of the models. After examining these predictions, I opted to use a cutoff point of 0.5 for each model, and all models produced the same success rate of `r succ_rate_lm7`, which is identical to the success rate for the benchmark logistic regression model fitted. As a result, it appears that each model has similar prediction ability, but none of these models are better than the logistic regression model with the contrasts and proportion of active neurons as covariates. To further examine these four models, I used the same code as the first ROC curve plot to plot the ROC curves for each model along with the benchmark logistic model ROC curve and the line $y = x$:
+
+```{r ROC Curves Benchmark and Models 4-7, echo=FALSE, cache=TRUE}
+pr5 = prediction(pred_lm4, test_data3$feedback_binary)
+prf6 = performance(pr5, measure = "tpr", x.measure = "fpr")
+auc6 = performance(pr5, measure = "auc")
+auc6 = auc6@y.values[[1]]
+
+pr6 = prediction(pred_lm5, test_data3$feedback_binary)
+prf7 = performance(pr6, measure = "tpr", x.measure = "fpr")
+auc7 = performance(pr6, measure = "auc")
+auc7 = auc7@y.values[[1]]
+
+pr7 = prediction(pred_lm6, test_data3$feedback_binary)
+prf8 = performance(pr7, measure = "tpr", x.measure = "fpr")
+auc8 = performance(pr7, measure = "auc")
+auc8 = auc8@y.values[[1]]
+
+pr8 = prediction(pred_lm7, test_data3$feedback_binary)
+prf9 = performance(pr8, measure = "tpr", x.measure = "fpr")
+auc9 = performance(pr8, measure = "auc")
+auc9 = auc9@y.values[[1]]
+
+plot(prf6, col = 'red', main = 'ROC Curves')
+plot(prf, add = TRUE, col = 'blue')
+plot(prf7, add = TRUE, col = 'green')
+plot(prf8, add = TRUE, col = 'pink')
+plot(prf9, add = TRUE, col = 'darkorchid1')
+abline(a=0, b=1, col='black', lty=3)
+
+legend("bottomright", legend=c("Benchmark", "Logistic Model 4", "Logistic Model 5", 
+                               "Logistic Model 6", "Logistic Model 7", "Bias Line"), 
+       col=c("blue", "red", 'green', 'pink', 'darkorchid1','black'), lty=c(1, 1, 1, 3), cex=0.8)
+```
+
+The ROC curves are fairly similar for most of the models, except for the model with the mean number of spikes for active neurons and the contrasts as the covariates. For that model, it appears that the prediction performance is slightly better on the range from 0 to 0.2 for false positive rate, but after that point, the performance dips below the other models. The area under the ROC curves is similar for most of the models, but the model "Logistic Model 7" has slightly less area under the ROC curve, which would provide some evidence that this model is not the best for performance. However, none of the four models tested in this step provide convincing evidence of being more accurate in predicting feedback than the benchmark.
+
+<br/>
+
+```{r Cori and Lederberg Models, echo=FALSE, cache=TRUE}
+set.seed(1)
+samp_cori = sample.int(n = nrow(cori_data), size = floor(.8 * nrow(cori_data)), replace = FALSE)
+train_cori = cori_data[samp_cori, ]
+test_cori = cori_data[-samp_cori, ]
+model_cori = glm(feedback_binary ~ mean_spikes_active_neurons + mean_spikes_all_neurons + left_contrast + right_contrast,
+        data = train_cori, family = 'binomial')
+
+pred_cori = predict(model_cori, test_cori %>% select(-feedback_binary), type = 'response')
+prediction_cori = ifelse(pred_cori > 0.55, 1, 0)
+error_cori = mean(prediction_cori != test_cori$feedback_binary)
+succ_rate_cori = 1 - error_cori
+
+samp_led = sample.int(n = nrow(lederberg_data), size = floor(.8 * nrow(lederberg_data)), replace = FALSE)
+train_led = lederberg_data[samp_led, ]
+test_led = lederberg_data[-samp_led, ]
+
+model_led = glm(feedback_binary ~  proportion_active_neurons * mean_spikes_all_neurons + mean_spikes_all_neurons + left_contrast * right_contrast,
+        data = train_led, family = 'binomial')
+pred_led = predict(model_led, test_led %>% select(-feedback_binary), type = 'response')
+prediction_led = ifelse(pred_led > 0.5, 1, 0)
+error_led = mean(prediction_led != test_led$feedback_binary)
+succ_rate_led = 1 - error_led
+
+pr10 = prediction(pred_cori, test_cori$feedback_binary)
+prf10 = performance(pr10, measure = "tpr", x.measure = "fpr")
+auc10 = performance(pr10, measure = "auc")
+auc10 = auc10@y.values[[1]]
+
+pr11 = prediction(pred_led, test_led$feedback_binary)
+prf11 = performance(pr11, measure = "tpr", x.measure = "fpr")
+auc11 = performance(pr11, measure = "auc")
+auc11 = auc11@y.values[[1]]
+```
+
+After testing various models, I used the data sets `cori_data` and `lederberg_data` to create logistic regression models. I used the same steps as before, and experimented with variables in the regression to find the models with the highest prediction accuracy values. Using the data from sessions with mouse Cori, I fit a model with the contrasts, the mean spikes for all neurons, and the mean spikes for active neurons as the covariates. I also used a cutoff point of 0.55 as it increased my prediction accuracy. After testing the model on the test data which comprised 20% of `cori_data`, the prediction accuracy was `r succ_rate_cori`, which is well above the prediction accuracy of `r succ_rate_lm1` for the benchmark model. Using the data from sessions with mouse Lederberg, I fit a model with the mean spikes for all neurons and two interaction terms: `proportion_active_neurons` * `mean_spikes_all_neurons` and `left_contrast` * `right_contrast.` I chose these two interaction terms because I wanted to interact the proportion of active neurons the mean spikes for all neurons to capture the fact that not every neuron showed spikes for every trial, and because the action of the mouse and the subsequent feedback type depends on whether the left contrast and right contrast are equal or not, so I felt that there would be a relationship between the left and right contrasts. I also used a cutoff point of 0.5 for this model as it increased my prediction accuracy. Testing this model on the Lederberg test data, I got a prediction accuracy of `r succ_rate_led`, which is again much higher than the benchmark accuracy. To further examine this improvement in accuracy, I plotted the ROC curves below:
+
+```{r Cori/Lederberg Model ROC Curves, echo=FALSE, cache=TRUE}
+plot(prf11, col = 'red', main = 'ROC Curves')
+plot(prf, add = TRUE, col = 'blue')
+plot(prf10, add = TRUE, col = 'darkorchid1')
+abline(a=0, b=1, col='black', lty=3)
+
+legend("bottomright", legend=c("Benchmark", "Lederberg Model", "Cori Model", "Bias Line"), 
+       col=c("blue", "red", "darkorchid1", "black"), lty=c(1, 1, 1, 3), cex=0.8)
+```
+
+The ROC curves clearly show the two models fitted exhibit better predictive accuracy than the benchmark model. For all values of false positive rate, the model fitted using Lederberg data and the model fitted using Cori data both have higher true positive rates than the benchmark model, sometimes significantly so. The area under the ROC curve is `r auc10` for the model fitted using Cori data and `r auc11` for the model fitted using Lederberg data, both much higher values than the benchmark area under the ROC curve of `r auc`. As a result, I decided that these two models are the best in terms of predictive accuracy out of the models I tested. Ultimately, I opted to use the model fitted using the Cori data to predict the randomly selected test data from Session 1, and the model fitted using Lederberg data to predict the randomly selected test data from Session 18, as I wanted to predict the feedback type using data from the same mouse that performed the trials in each of the sessions.
+
+<br/>
+
+Below is a table summarizing the results from each model fitted:
+
+```{r Summary of Models, cache=TRUE, echo=FALSE}
+model_summaries = data.frame(model_type = c("Logistic (Benchmark)", "Logistic (Lasso Penalty)",
+                                            "Logistic (Ridge Penalty)", rep("Logistic", 8)),
+                             sessions = c(rep("1-18", 9), "1-3", "12-18"),
+                             response_var = rep("feedback_binary", 11),
+                             covariates = c("mean_spikes_all_neurons, left_contrast, right_contrast",
+                                            "mean_spikes_all_neurons, left_contrast, right_contrast",
+                                            "mean_spikes_all_neurons, left_contrast, right_contrast",
+                                           "mean_spikes_all_neurons, left_contrast, right_contrast, proportion_active_neurons",
+                                           "left_contrast, right_contrast, proportion_active_neurons",
+                                           "mean_spikes_all_neurons, left_contrast, right_contrast, proportion_active_neurons, mean_spikes_active_neurons",
+                                           "left_contrast, right_contrast, proportion_active_neurons, mean_spikes_active_neurons",
+                                            "mean_spikes_all_neurons, left_contrast, right_contrast, mean_spikes_active_neurons",
+                                            "left_contrast, right_contrast, mean_spikes_active_neurons",
+                                           "mean_spikes_active_neurons, mean_spikes_all_neurons, left_contrast, right_contrast",
+                                           "proportion_active_neurons * mean_spikes_all_neurons, mean_spikes_all_neurons, left_contrast * right_contrast"),
+                             cutoff = c(0.5, 0.5, 0.4, 0.5, 0.6, rep.int(0.5, times = 4), 0.55, 0.5),
+                             success_rate = c(succ_rate_lm1, succ_rate_lasso, succ_rate_ridge_0.4, succ_rate_lm_2,
+                                              succ_rate_lm_3, succ_rate_lm4, succ_rate_lm5, succ_rate_lm6, succ_rate_lm7,
+                                              succ_rate_cori, succ_rate_led))
+colnames(model_summaries) = c("Model Type", "Sessions in Data", "Response Variable",
+                              "Covariates", "Prediction Cutoff Point", "Prediction Success Rate")
+                              
+kbl(x = model_summaries, format = "html", digits = 3, table.attr = "class='table table-hover'",
+    caption = "<center><h1>Summary of Predictive Models</h1><center>", align = "c") %>%
+  kable_styling(fixed_thead = TRUE)
+```
+
+------------------------------------------------------------------------
+
+## Test Data
+
+```{r Session 1 Data Import, cache=TRUE, echo=FALSE}
+sess_1 = readRDS('/Users/revanthrao/Desktop/UC Davis/STA 141A/Data/test1.rds')
+
+n_1 = length(sess_1$contrast_right)
+  
+df_1 = data.frame(name = rep(sess_1$mouse_name, n_1),
+                  session_id = rep(1, n_1),
+                  left_contrast = sess_1$contrast_left,
+                  right_contrast = sess_1$contrast_right,
+                  mean_spikes_all_neurons = rep(0, n_1),
+                  proportion_active_neurons = rep(0, n_1),
+                  mean_spikes_active_neurons = rep(0, n_1),
+                  number_brain_areas = rep(length(unique(sess_1$brain_area)), n_1),
+                  feedback_type = sess_1$feedback_type,
+                  feedback_binary = rep(0, n_1))
+for (i in 1:n_1) {
+  success_binary = ifelse(sess_1$feedback_type[[i]] == 1, 1, 0)
+  spks.trial = sess_1$spks[[i]]
+  total.spikes = apply(spks.trial,1,sum)
+  avg.spikes=mean(total.spikes)
+  prop_active_neurons = mean(total.spikes > 0)
+  active_neurons_mean = mean(total.spikes[total.spikes>0])
+  df_1$mean_spikes_all_neurons[i] = avg.spikes
+  df_1$proportion_active_neurons[i] = prop_active_neurons
+  df_1$mean_spikes_active_neurons[i] = active_neurons_mean
+  df_1$feedback_binary[i] = success_binary
+}
+
+df_1 = df_1 %>%
+  select(-feedback_type)
+
+kable_df_1 = df_1
+colnames(kable_df_1) = c("Mouse Name", "Session", "Left Contrast", "Right Contrast",
+                         "Mean Spikes for All Neurons", "Proportion of Active Neurons",
+                         "Mean Spikes for Active Neurons", "Number of Brain Areas",
+                         "Feedback Type Binary")
+```
+
+```{r Session 18 Data Import, cache=TRUE, echo=FALSE} 
+sess_18 = readRDS('/Users/revanthrao/Desktop/UC Davis/STA 141A/Data/test2.rds')
+
+n_18 = length(sess_18$contrast_right)
+  
+df_18 = data.frame(name = rep(sess_18$mouse_name, n_18),
+                  session_id = rep(18, n_18),
+                  left_contrast = sess_18$contrast_left,
+                  right_contrast = sess_18$contrast_right,
+                  mean_spikes_all_neurons = rep(0, n_18),
+                  proportion_active_neurons = rep(0, n_18),
+                  mean_spikes_active_neurons = rep(0, n_18),
+                  number_brain_areas = rep(length(unique(sess_18$brain_area)), n_18),
+                  feedback_type = sess_18$feedback_type,
+                  feedback_binary = rep(0, n_18))
+for (i in 1:n_18) {
+  success_binary = ifelse(sess_18$feedback_type[[i]] == 1, 1, 0)
+  spks.trial = sess_18$spks[[i]]
+  total.spikes = apply(spks.trial,1,sum)
+  avg.spikes=mean(total.spikes)
+  prop_active_neurons = mean(total.spikes > 0)
+  active_neurons_mean = mean(total.spikes[total.spikes>0])
+  df_18$mean_spikes_all_neurons[i] = avg.spikes
+  df_18$proportion_active_neurons[i] = prop_active_neurons
+  df_18$mean_spikes_active_neurons[i] = active_neurons_mean
+  df_18$feedback_binary[i] = success_binary
+}
+
+df_18 = df_18 %>%
+  select(-feedback_type)
+
+kable_df_18 = df_18
+colnames(kable_df_18) = c("Mouse Name", "Session", "Left Contrast", "Right Contrast",
+                         "Mean Spikes for All Neurons", "Proportion of Active Neurons",
+                         "Mean Spikes for Active Neurons", "Number of Brain Areas",
+                         "Feedback Type Binary")
+```
+
+To finish the project, I tested my models on the test data provided. I first imported both sets of test data, then created similar data set as original data set I used for generating models. I used the same code as I did when creating the original full data set to make these data sets. The two data sets contained information about the mouse name, session number, both contrasts, the mean number of spikes for all neurons, the proportion of active neurons, the mean number of spikes for active neurons, the number of brain areas, and the feedback type. When making these two data sets, I chose not to include the trial number and total spikes variables in the data set, both of which were present in my original data set. I omitted the trial number because it is unclear which trials this data provides information for, and I omitted the total spikes variable because I did not use it in either model. Below are the first ten rows from the two data sets I created:
+
+```{r Test Data Tables, cache=TRUE, echo=FALSE}
+kbl(x = head(kable_df_1, n = 10), format = "html", digits = 3, table.attr = "class='table table-hover'",
+      caption = "<center><h1>Test Data from Session 1</h1><center>", align = "c") %>%
+  kable_styling(fixed_thead = TRUE)
+
+kbl(x = head(kable_df_18, n = 10), format = "html", digits = 3, table.attr = "class='table table-hover'",
+      caption = "<center><h1>Test Data from Session 18</h1><center>", align = "c") %>%
+  kable_styling(fixed_thead = TRUE)
+```
+
+```{r Test Data Removing Variables, cache=TRUE, echo=FALSE}
+df_1 = df_1 %>%
+  select(-c(name, session_id, number_brain_areas))
+df_18 = df_18 %>%
+  select(-c(name, session_id, number_brain_areas))
+```
+
+```{r Model Testing, cache=TRUE, echo=FALSE}
+set.seed(1)
+pred_test_1 = predict(model_cori, df_1 %>% select(-feedback_binary), type = 'response')
+prediction_test_1 = ifelse(pred_test_1 > 0.55, 1, 0)
+error_test_1 = mean(prediction_test_1 != df_1$feedback_binary)
+succ_rate_test_1 = 1 - error_test_1
+
+pred_test_2 = predict(model_led, df_18 %>% select(-feedback_binary), type = 'response')
+prediction_test_2 = ifelse(pred_test_2 > 0.5, 1, 0)
+error_test_2 = mean(prediction_test_2 != df_18$feedback_binary)
+succ_rate_test_2 = 1 - error_test_2
+```
+
+<br/>
+
+After creating these two data sets, I removed the mouse name, number of brain areas, and session number in order to create a data set which included the variables that I used for the two models. After this, I set the random seed to allow for replication of my results, then used the models to predict the feedback type from the test data using similar code as I did when testing the models before. As mentioned previously, I used the model fitted using data from mouse Cori to predict the outcome for the test data from Session 1, and I used the model fitted using data from mouse Lederberg to predict the outcome for the test data from Session 18. 
+
+After testing the models on the test data provided, I obtained a prediction success rate of `r succ_rate_test_1` for the model fitted with data from mouse Cori, and I obtained a prediction success rate of `r succ_rate_test_2` for the model fitted with data from mouse Lederberg. Overall, the prediction success rate for all trials in the test data was `r 0.5*(succ_rate_test_1 + succ_rate_test_2)`. While these prediction success rates are slightly lower than the success rates I obtained when initially training the models, all three success rates at least match or exceed the naive prediction of success for every trial. As a result, while the prediction accuracy could be improved slightly, I believe my models provide a solid framework for making predictions on this data. 
+
+------------------------------------------------------------------------
+
+## Discussion
+
+In this project, I received data from an experiment by Steinmetz et al. regarding neural activity of mice and was tasked with building a prediction model to predict the feedback a mouse received for any given trial. After exploring the data, I determined using hypothesis testing that the mean number of neuron spikes in a trial was significantly different between the different mice, and after testing various models, I decided to use models built on data from the mice used in sessions in the test data sets. After building these models using the left and right contrast values as well as summary statistics about the neural activity during each trial, I tested the models on the provided test data and received prediction success rates of `r succ_rate_test_1` and `r succ_rate_test_2`, with an overall success rate of `r 0.5*(succ_rate_test_1 + succ_rate_test_2)`.
+
+After testing my results, I believe that my models do reasonably well at predicting feedback for each trial. While prediction accuracy could potentially be improved using advanced techniques, I feel that given the structure and complexity of this data set, it would be quite difficult to build a model with a very high level of accuracy. However, I believe that the models I proposed provide an intuitive and understandable way to predict feedback using the information given in the data. To improve the prediction performance of my model, I would propose possibly using more data to tune the model more carefully, using more advanced models such as Random Forest or neural networks to make predictions, or calculating different summary statistics to use as covariates in the model. Overall, I feel that my models provide a solid, understandable solution for predicting the feedback of a trial, and I believe these models can certainly be applied for prediction of results in the future.
+
+------------------------------------------------------------------------
+
+## Reference
+
+Steinmetz, N.A., Zatka-Haas, P., Carandini, M. et al. Distributed coding of choice, action and engagement across the mouse brain. Nature 576, 266–273 (2019). https://doi.org/10.1038/s41586-019-1787-x
+
+------------------------------------------------------------------------
+
+## Appendix
+
+<br/>
+
+**Plot 1:**
+
+```{r Appendix Plot 1, cache=TRUE, echo=FALSE}
+ggplot(data = trial_summaries_by_area[[1]], aes(x = id, y = ACA)) +
+  geom_line() + 
+  labs(title = "Mean of Spikes by Brain Area ACA for Session 1",
+       x = "Trial Number", y = "Mean") + 
+  theme(plot.title = element_text(hjust = 0.5))
+```
+
+<br/>
+
+**Plot 2:**
+
+```{r Appendix Plot 2, cache = TRUE, echo=FALSE}
+ggplot(data = trial_summaries_by_area[[1]], aes(x = id, y = CA3)) +
+  geom_line() + 
+  labs(title = "Mean of Spikes by Brain Area CA3 for Session 1",
+       x = "Trial Number", y = "Mean") +
+  theme(plot.title = element_text(hjust = 0.5))
+```
